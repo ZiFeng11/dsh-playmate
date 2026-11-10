@@ -42,6 +42,41 @@ TAG_RE = re.compile(r"<\|[^|]+\|>")
 
 import tempfile
 
+# ---- 长句分段识别 ------------------------------------------------------
+# 为什么：SenseVoiceSmall 训练以短句为主，一段话越长，解码时注意力越摊薄，
+# 漏字/错字越多（实测 16 s 内一个错都没有，32/48/64 s 开始零星漏）。
+# 切短了识别更稳，而且错误不累积。
+MAX_CHUNK_SEC = 20.0      # 超过这个长度就切
+CUT_SEARCH_FROM = 0.55    # 切点只在「后 45%」里找，保证每段别太短
+CUT_WIN_SEC = 0.15        # 判定"这里是不是停顿"的窗口
+
+
+def split_audio(audio, max_sec=MAX_CHUNK_SEC):
+    """把长音频切成若干段，切点优先落在能量最低的地方（相当于找停顿）。"""
+    max_len = int(max_sec * SR)
+    if audio is None or len(audio) <= max_len:
+        return [audio] if audio is not None else []
+
+    win = int(CUT_WIN_SEC * SR)
+    hop = int(0.05 * SR)
+    chunks = []
+    start = 0
+    while start < len(audio):
+        end = min(start + max_len, len(audio))
+        if end < len(audio) and end - start > win * 2:
+            lo = start + int((end - start) * CUT_SEARCH_FROM)
+            best_pos, best_e = end, None
+            for p in range(lo, end - win, hop):
+                seg = audio[p:p + win]
+                e = float(np.sqrt(np.mean(np.square(seg))) + 1e-9)
+                if best_e is None or e < best_e:
+                    best_e, best_pos = e, p + win // 2
+            end = best_pos
+        chunks.append(audio[start:end])
+        start = end
+    return [c for c in chunks if len(c) > 0]
+
+
 _LOG_DIR = pathlib.Path(tempfile.gettempdir()) / "dsh-playmate"
 LOG_PATH = pathlib.Path(os.environ.get("PLAY_EAR_LOG", str(_LOG_DIR / "ear.log")))
 
@@ -180,7 +215,16 @@ class Ear:
             log(f"太短（{len(buf) * BLOCK:.2f}s），丢掉")
             return
         audio = np.concatenate(buf) if buf else np.zeros(0)
-        text = self.asr(audio)
+        # 长句切段识别，切点落在能量最低处（尽量对齐停顿）
+        chunks = split_audio(audio)
+        if len(chunks) > 1:
+            log(f"分段识别：{len(audio) / SR:.1f}s → {len(chunks)} 段")
+        parts = []
+        for ch in chunks:
+            t = self.asr(ch)
+            if t:
+                parts.append(t)
+        text = "".join(parts).strip()
         if not self.meaningful(text):
             log(f"没有实际内容（{text!r}），不发送")
             return
@@ -358,7 +402,9 @@ def main():
     ap.add_argument("--ctl", default="")
     ap.add_argument("--threshold", type=float, default=0.012)
     ap.add_argument("--silence-ms", type=int, default=700)
-    ap.add_argument("--max-sec", type=float, default=15)
+    # 录音缓冲的硬上限，只在"一直有声音"时才起作用（正常说完静音 700 ms 就收尾）。
+    # 它必须大于 MAX_CHUNK_SEC，否则永远攒不满一段、分段识别一次都跑不到。
+    ap.add_argument("--max-sec", type=float, default=60)
     ap.add_argument("--model", default=os.environ.get("PLAY_ASR_MODEL", "iic/SenseVoiceSmall"))
     a = ap.parse_args()
     beat()

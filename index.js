@@ -79,6 +79,8 @@ const DEFAULT_STATE = {
   vadThreshold: 0.012,
   /** 说：静音多少毫秒算一句话说完 */
   silenceMs: 700,
+  /** 说：一句话最长几秒（一直有声音时的硬上限；必须大于分段阈值才有意义） */
+  maxSec: 60,
   /** 说：语音送到哪儿 —— fixed=固定会话 / auto=跟随最近活动 */
   targetMode: 'auto',
   /** 说：固定会话的 id（targetMode=fixed 时生效） */
@@ -166,6 +168,7 @@ const CONFIG_FIELDS = {
   pythonPath: { kind: 'string', max: 400, label: 'python 路径', hint: '跑识别引擎用；留空走 PATH' },
   vadThreshold: { kind: 'number', min: 0.002, max: 0.2, label: '麦克风灵敏度阈值', hint: '默认 0.012；环境吵就调大' },
   silenceMs: { kind: 'number', min: 200, max: 3000, label: '静音多久算说完(ms)', hint: '默认 700' },
+  maxSec: { kind: 'number', min: 5, max: 600, label: '一句话最长几秒', hint: '默认 60；只在一直有声音时才生效，到点强制收尾。想回到旧行为填 15（但那样就攒不到 20 秒，分段识别用不上）' },
   targetMode: { kind: 'enum', values: ['auto', 'fixed'], label: '语音送到', hint: 'fixed=只进固定会话（防串台）；auto=跟随最近活动的会话' },
   targetSessionId: { kind: 'string', max: 120, label: '固定会话 id', hint: 'targetMode=fixed 时用；在下面的下拉里选' },
   showPill: { kind: 'enum', values: ['true', 'false'], label: '录音时显示小条', hint: 'false=不显示，只用提示音（热键模式下推荐）' },
@@ -345,7 +348,7 @@ export function apply(ctx) {
           Object.assign(state, check.patch)
           if (!writeState(state)) return sendJson(response, 500, { ok: false, error: 'state-write-failed' })
           // 模式/阈值这类参数是引擎**启动时**读的，改了必须重启引擎才生效
-          const needsEngineRestart = ['talkMode', 'vadThreshold', 'silenceMs', 'pythonPath'].some((k) => k in check.patch)
+          const needsEngineRestart = ['talkMode', 'vadThreshold', 'silenceMs', 'pythonPath', 'maxSec'].some((k) => k in check.patch)
           const needsWatchRestart = ['seeMode', 'seeEvery', 'seeAutoDiff', 'seeMinGapSec', 'seePace'].some((k) => k in check.patch)
           if (needsWatchRestart && typeof syncWatch === 'function') {
             await syncWatch().catch(() => {})
