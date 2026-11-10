@@ -91,6 +91,8 @@ const DEFAULT_STATE = {
   msCacheDir: '',
   /** 听：念多少字（默认 80，约 40 个汉字） */
   speakChars: 80,
+  /** 听：过程话念多少字（默认 40；一轮中间的短句用这个上限，最终回复仍用 speakChars） */
+  speakMidChars: 40,
   /** 看：手动（模型需要时才看）还是自动（画面变了就叫它看） */
   seeMode: 'manual',
   /** 看：自动模式两帧之间至少隔多少个 10 毫秒（这里存秒） */
@@ -172,6 +174,7 @@ const CONFIG_FIELDS = {
   msCacheDir: { kind: 'string', max: 400, label: '模型缓存目录', hint: '留空用系统默认；如果引擎报 model not registered，把它指到可写目录（例如 D:/mc/mscache）' },
   asrModel: { kind: 'string', max: 200, label: '识别模型', hint: '默认 iic/SenseVoiceSmall（快、够用）；长句同音字容易错，可换成更大的模型，见 README「识别精度」' },
   speakChars: { kind: 'number', min: 10, max: 600, label: '念多少字', hint: '默认 80（约 40 个汉字）；只念回答的开头这一段' },
+  speakMidChars: { kind: 'number', min: 10, max: 600, label: '过程话念多少字', hint: '默认 40；一轮中间那些短句用这个上限，最终回复仍用上面那条' },
   seeMode: { kind: 'enum', values: ['manual', 'auto'], label: '看屏幕的方式', hint: 'manual=模型判断需要时才看；auto=画面变化后自动送一帧进来（打游戏用这个）' },
   seeMinGapSec: { kind: 'number', min: 3, max: 120, label: '自动模式最短间隔(秒)', hint: '默认 15；再剧烈也不会比这更频繁' },
   seeAutoDiff: { kind: 'number', min: 1, max: 60, label: '自动模式变化阈值', hint: '默认 8；越小越敏感（也越费）' },
@@ -862,12 +865,29 @@ function registerHear(ctx) {
     /** 每个会话这一轮攒下来的回答文字 */
     const drafts = new Map()
 
+    /** 只念目标会话的话；limit 为空 = 用「念多少字」 */
+    const speakIfTarget = (sid, text, limit) => {
+      if (String(text ?? '').trim() === '') return
+      const state = readState()
+      // 固定会话时，只念那个会话的回答，别把别的窗口的话念出来
+      if (state.targetMode === 'fixed' && String(state.targetSessionId ?? '') !== '' && sid !== state.targetSessionId) return
+      void hear.speak(text, limit)
+    }
+
     try {
       host.on?.('agent/assistant-stream', (payload) => {
         const sid = String(payload?.agent?.session?.id ?? '')
         if (sid === '') return
         const frame = payload?.frame
         if (frame?.type === 'start') {
+          // 一轮里模型常分好几段说（先给一句、调工具、再补结论）。原来这里直接
+          // set(sid, '')，等于每开一段就把上一段抹掉，最终只剩最后一段被念出来。
+          // 现在改成：开新段之前，先把上一段按「过程话」的上限念出去。
+          const prev = drafts.get(sid) ?? ''
+          if (prev.trim() !== '') {
+            const mid = Number(readState().speakMidChars)
+            speakIfTarget(sid, prev, Number.isFinite(mid) && mid > 0 ? mid : 40)
+          }
           drafts.set(sid, '')
           return
         }
@@ -880,11 +900,7 @@ function registerHear(ctx) {
         const sid = String(payload?.agent?.session?.id ?? '')
         const text = drafts.get(sid) ?? ''
         drafts.delete(sid)
-        if (text.trim() === '') return
-        const state = readState()
-        // 固定会话时，只念那个会话的回答，别把别的窗口的话念出来
-        if (state.targetMode === 'fixed' && String(state.targetSessionId ?? '') !== '' && sid !== state.targetSessionId) return
-        void hear.speak(text)
+        speakIfTarget(sid, text)
       })
       log('[dsh-playmate/hear] 已挂上会话输出钩子')
     } catch (e) {
