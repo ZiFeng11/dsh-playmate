@@ -42,6 +42,116 @@ TAG_RE = re.compile(r"<\|[^|]+\|>")
 
 import tempfile
 
+# ---- 纠错词表 ----------------------------------------------------------
+# 语音识别对专有名词、英文缩写、同音字一向不稳。这是留给使用者的入口：
+# 一个纯文本词表，每次识别前重读一遍（改完不用重启引擎）。
+# 格式见仓库根目录的 vocab.example.txt。路径由 PLAY_VOCAB 指定；不指定则不启用。
+VOCAB_PATH = os.environ.get("PLAY_VOCAB", "").strip()
+
+
+def load_vocab(path=VOCAB_PATH):
+    """读词表。
+
+    返回 (显式替换, 正则规则, 热词表)：
+      显式替换 [(错, 对)]
+      正则     [(模式, 替换)]
+      热词表   [正确词]  —— 取自每条规则的右值，供拼音模糊匹配兜底
+
+    为什么右值也要拿来当热词：模糊匹配（阈值 0.85）能抓住只差声母韵母的近音写法，
+    不用一个个把错写法列出来。但它够不着差得远的，那种还是得靠左边的显式映射。
+    """
+    explicit, regexes, targets = [], [], []
+    if not path:
+        return explicit, regexes, targets
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=>" not in line:
+                    continue
+                left, right = line.split("=>", 1)
+                left, right = left.strip(), right.strip()
+                if left == "":
+                    # 左边留空 = 只加热词，不配错词：交给拼音模糊匹配去抓近音写法，
+                    # 不用提前想它会错成什么样。
+                    if right and right not in targets:
+                        targets.append(right)
+                    continue
+                if left.startswith("re:"):
+                    regexes.append((left[3:].strip(), right))
+                else:
+                    explicit.append((left, right))
+                    if right and right not in targets:
+                        targets.append(right)
+    except Exception:
+        pass
+    return explicit, regexes, targets
+
+
+def build_matcher(targets, threshold=0.85):
+    """拼音模糊匹配器；词表为空、或环境里跑不了时返回 None（只用显式替换）。"""
+    if not targets:
+        return None
+    try:
+        from funasr.utils.postprocess_hotwords import build_postprocess_hotword_matcher
+
+        return build_postprocess_hotword_matcher(
+            postprocess_hotwords=targets,
+            postprocess_hotword_threshold=threshold,
+        )
+    except Exception as e:
+        log(f"热词匹配器建不起来（{type(e).__name__}: {e}），只用显式替换")
+        return None
+
+
+_MATCHER_CACHE = {"key": None, "matcher": None}
+
+
+def get_matcher(targets, threshold=0.85):
+    """带缓存的匹配器：词表内容不变就复用。
+
+    注意成本构成：建表本身是毫秒级，但**第一次** import
+    funasr.utils.postprocess_hotwords 很贵（它会把 funasr 一大片拽进来）。
+    所以启动时先 warmup_matcher() 把这笔开销吃掉，别让它落在第一句话上。
+    """
+    key = (tuple(sorted(targets)), threshold)
+    if _MATCHER_CACHE["key"] == key:
+        return _MATCHER_CACHE["matcher"]
+    m = build_matcher(targets, threshold)
+    _MATCHER_CACHE["key"] = key
+    _MATCHER_CACHE["matcher"] = m
+    return m
+
+
+def warmup_matcher():
+    targets = load_vocab()[2]
+    if not targets:
+        return
+    t0 = time.time()
+    get_matcher(targets)
+    log(f"热词匹配器预热完成（{time.time() - t0:.1f}s，热词 {len(targets)} 个）")
+
+
+def apply_vocab(text, rules, matcher=None):
+    """显式替换 → 正则 → 拼音模糊兜底。顺序不能反：正则看的是原始上下文。"""
+    if not text:
+        return text
+    explicit, regexes, _targets = rules
+    for left, right in explicit:
+        text = text.replace(left, right)
+    for pat, rep in regexes:
+        try:
+            text = re.sub(pat, rep, text)
+        except Exception:
+            continue
+    if matcher is not None:
+        try:
+            text, _matches = matcher.apply_text(text)
+        except Exception:
+            pass
+    return text
+
+
 _LOG_DIR = pathlib.Path(tempfile.gettempdir()) / "dsh-playmate"
 LOG_PATH = pathlib.Path(os.environ.get("PLAY_EAR_LOG", str(_LOG_DIR / "ear.log")))
 
@@ -124,6 +234,7 @@ class Ear:
         self.model = AutoModel(model=target, disable_update=True, device=device)
         log(f"模型来源：{target}（device={device}）")
         log(f"识别模型就绪（{time.time() - t0:.1f}s；模式={self.mode}；阈值={self.threshold}）")
+        warmup_matcher()
 
     def asr(self, audio):
         import tempfile
@@ -184,6 +295,13 @@ class Ear:
             return
         audio = np.concatenate(buf) if buf else np.zeros(0)
         text = self.asr(audio)
+        # 纠错词表（每次重读，改完不用重启；匹配器有缓存，词表变了才重建）
+        rules = load_vocab()
+        if rules[0] or rules[1] or rules[2]:
+            fixed = apply_vocab(text, rules, get_matcher(rules[2]))
+            if fixed != text:
+                log(f"词表纠错：{text[:40]!r} → {fixed[:40]!r}")
+            text = fixed
         if not self.meaningful(text):
             log(f"没有实际内容（{text!r}），不发送")
             return

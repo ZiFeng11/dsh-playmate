@@ -91,6 +91,8 @@ const DEFAULT_STATE = {
   asrModel: 'iic/SenseVoiceSmall',
   /** 说：模型缓存目录（留空=系统默认；有些机器默认目录写不进去，要指到可写盘） */
   msCacheDir: '',
+  /** 说：纠错词表路径（留空 = 不启用；格式见 vocab.example.txt） */
+  vocabPath: '',
   /** 听：念多少字（默认 80，约 40 个汉字） */
   speakChars: 80,
   /** 看：手动（模型需要时才看）还是自动（画面变了就叫它看） */
@@ -173,6 +175,7 @@ const CONFIG_FIELDS = {
   targetSessionId: { kind: 'string', max: 120, label: '固定会话 id', hint: 'targetMode=fixed 时用；在下面的下拉里选' },
   showPill: { kind: 'enum', values: ['true', 'false'], label: '录音时显示小条', hint: 'false=不显示，只用提示音（热键模式下推荐）' },
   msCacheDir: { kind: 'string', max: 400, label: '模型缓存目录', hint: '留空用系统默认；如果引擎报 model not registered，把它指到可写目录（例如 D:/mc/mscache）' },
+  vocabPath: { kind: 'string', max: 400, label: '纠错词表', hint: '留空 = 不启用。填一个纯文本文件路径，格式见 vocab.example.txt；改文件内容不用重启，改路径要重启引擎' },
   asrModel: { kind: 'string', max: 200, label: '识别模型', hint: '默认 iic/SenseVoiceSmall（快、够用）；长句同音字容易错，可换成更大的模型，见 README「识别精度」' },
   speakChars: { kind: 'number', min: 10, max: 600, label: '念多少字', hint: '默认 80（约 40 个汉字）；只念回答的开头这一段' },
   seeMode: { kind: 'enum', values: ['manual', 'auto'], label: '看屏幕的方式', hint: 'manual=模型判断需要时才看；auto=画面变化后自动送一帧进来（打游戏用这个）' },
@@ -348,7 +351,8 @@ export function apply(ctx) {
           Object.assign(state, check.patch)
           if (!writeState(state)) return sendJson(response, 500, { ok: false, error: 'state-write-failed' })
           // 模式/阈值这类参数是引擎**启动时**读的，改了必须重启引擎才生效
-          const needsEngineRestart = ['talkMode', 'vadThreshold', 'silenceMs', 'pythonPath', 'asrDevice'].some((k) => k in check.patch)
+
+          const needsEngineRestart = ['talkMode', 'vadThreshold', 'silenceMs', 'pythonPath', 'asrDevice', 'vocabPath'].some((k) => k in check.patch)
           const needsWatchRestart = ['seeMode', 'seeEvery', 'seeAutoDiff', 'seeMinGapSec', 'seePace'].some((k) => k in check.patch)
           if (needsWatchRestart && typeof syncWatch === 'function') {
             await syncWatch().catch(() => {})
