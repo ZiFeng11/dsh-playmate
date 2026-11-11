@@ -175,8 +175,18 @@ class Ear:
 
     @staticmethod
     def meaningful(text):
-        """只有标点/空白的结果不算话（实测：一声杂音会被识别成 '。'）。"""
-        return re.search(r"[0-9A-Za-z一-鿿]", text or "") is not None
+        """太短的结果不算话。
+
+        原来只滤「纯标点 / 空白」——一声杂音常被识别成「。」。但单字的误识别率
+        同样高：环境音常被认成「嗯」「好」，然后整条投递出去，等于凭空多了一轮
+        没人说过的对话。
+
+        改成要求至少两个实字（汉字 / 字母 / 数字）。代价是真正只说一个字时也会
+        被丢掉——「嗯」「好」这类一字回应听不到了；更想要那种极短回应的话，把
+        下面的 2 改回 1 即可。
+        """
+        core = re.findall(r"[0-9A-Za-z一-鿿]", text or "")
+        return len(core) >= 2
 
     def transcribe_and_send(self, buf):
         if len(buf) * BLOCK < 0.45:
